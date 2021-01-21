@@ -16,28 +16,27 @@
 package com.wso2telco.dep.responsefilter;
 
 import java.io.IOException;
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.util.ArrayList;
 import java.util.Iterator;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.wso2telco.core.dbutils.DbUtils;
-import com.wso2telco.core.dbutils.util.DataSourceNames;
+import com.wso2telco.dep.responsefilter.dao.CacheDecorator;
+import com.wso2telco.dep.responsefilter.dao.DbFilterSchemaDao;
+import com.wso2telco.dep.responsefilter.dao.FilterSchemaDao;
 import lk.chathurabuddi.json.schema.constants.FreeFormAction;
 import lk.chathurabuddi.json.schema.filter.JsonSchemaFilter;
 import org.apache.synapse.MessageContext;
 import org.apache.synapse.commons.json.JsonUtil;
 import org.apache.synapse.core.axis2.Axis2MessageContext;
 import org.apache.synapse.mediators.AbstractMediator;
-import org.glassfish.jersey.uri.UriTemplate;
 
 public class ResponseFilterMediator extends AbstractMediator {
 
+    private FilterSchemaDao filterSchemaDao = new DbFilterSchemaDao();
+    private String cacheEnabled;
+
     public boolean mediate(MessageContext messageContext) {
+        long beginTimestamp = System.currentTimeMillis();
         String api = messageContext.getProperty("api.ut.api").toString() + ":" + messageContext.getProperty("api.ut.version").toString();
         String httpVerb = messageContext.getProperty("api.ut.HTTP_METHOD").toString();
         String resource = messageContext.getProperty("api.ut.resource").toString();
@@ -52,7 +51,7 @@ public class ResponseFilterMediator extends AbstractMediator {
         try {
             String jsonString = (String) messageContext.getProperty("jsonPayload");
             if (jsonString != null && !"".equals(jsonString.trim())){
-                String filterSchema = findFilterSchema(userId, appName, api, httpVerb, resource);
+                String filterSchema = this.filterSchemaDao.find(userId, appName, api, httpVerb, resource);
                 if (filterSchema != null) {
                     String filteredJson = new JsonSchemaFilter(filterSchema, jsonString, FreeFormAction.DETACH).filter();
                     if (isNonEmptyJson(filteredJson) || isMatchingPayload(jsonString, filterSchema)) {
@@ -64,6 +63,8 @@ public class ResponseFilterMediator extends AbstractMediator {
             log.error("Error while filtering the response.", e);
             return false;
         }
+        long endTimestamp = System.currentTimeMillis();
+        log.debug("response filter mediator took " + (endTimestamp-beginTimestamp) + "ms");
         return true;
     }
 
@@ -92,38 +93,16 @@ public class ResponseFilterMediator extends AbstractMediator {
         return filteredJson != null && !filteredJson.isEmpty() && !"{}".equals(filteredJson);
     }
 
-    public String findFilterSchema(String sp, String application, String api, String httpVerb, String resource) throws Exception {
-        Connection connection = null;
-        PreparedStatement statement = null;
-        ResultSet resultSet = null;
-        String filterSchema = null;
+    public String isCacheEnabled() {
+        return cacheEnabled;
+    }
 
-        try {
-            connection = DbUtils.getDbConnection(DataSourceNames.WSO2TELCO_DEP_DB);
-            if (connection == null) {
-                throw new SQLException("database connection error");
-            }
-
-            StringBuilder query = new StringBuilder("SELECT operation, fields FROM response_filter");
-            query.append(" WHERE sp=? AND application=? AND api=?");
-            statement = connection.prepareStatement(query.toString());
-            statement.setString(1, sp);
-            statement.setString(2, application);
-            statement.setString(3, api);
-            resultSet = statement.executeQuery();
-
-            while (resultSet.next()) {
-                String[] uriTemplateComponents = resultSet.getString(1).split(" ");
-                if (httpVerb != null &&
-                    httpVerb.equals(uriTemplateComponents[0]) &&
-                    new UriTemplate(uriTemplateComponents[1]).match(resource, new ArrayList<String>())) {
-                    filterSchema = resultSet.getString(2);
-                }
-            }
-        } finally {
-            DbUtils.closeAllConnections(statement, connection, resultSet);
+    public void setCacheEnabled(String cacheEnabled) {
+        this.cacheEnabled = cacheEnabled;
+        if ("true".equals(cacheEnabled)) {
+            log.debug("response filter caching enabled");
+            this.filterSchemaDao = new CacheDecorator(this.filterSchemaDao);
         }
-        return filterSchema;
     }
 
 }
